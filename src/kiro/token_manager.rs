@@ -804,7 +804,7 @@ impl MultiTokenManager {
                     tracing::warn!("凭据 #{} Token 刷新失败: {}", id, e);
                     attempt_count += 1;
                     if !has_available {
-                        anyhow::bail!("所有凭据均已禁用（0/{})", total);
+                        anyhow::bail!("所有凭据均已禁用（0/{}）", total);
                     }
                 }
             }
