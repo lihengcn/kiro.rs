@@ -1134,6 +1134,10 @@ impl MultiTokenManager {
                 None => return entries.iter().any(|e| !e.disabled),
             };
 
+            if entry.disabled {
+                return entries.iter().any(|e| !e.disabled);
+            }
+
             entry.failure_count += 1;
             entry.last_used_at = Some(Utc::now().to_rfc3339());
             let failure_count = entry.failure_count;
@@ -2064,7 +2068,7 @@ mod tests {
         let snapshot = manager.snapshot();
         let first = snapshot.entries.iter().find(|e| e.id == 1).unwrap();
         assert!(first.disabled);
-        assert_eq!(first.failure_count, MAX_FAILURES_PER_CREDENTIAL);
+        assert_eq!(first.refresh_failure_count, MAX_FAILURES_PER_CREDENTIAL);
         assert_eq!(snapshot.current_id, 2);
     }
 
