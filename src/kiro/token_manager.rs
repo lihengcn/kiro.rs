@@ -670,7 +670,7 @@ impl MultiTokenManager {
     /// 根据负载均衡模式选择下一个凭据
     ///
     /// - priority 模式：选择优先级最高（priority 最小）的可用凭据
-    /// - balanced 模式：均衡选择可用凭据
+    /// - balanced 模式：随机选择可用凭据
     ///
     /// # 参数
     /// - `model`: 可选的模型名称，用于过滤支持该模型的凭据（如 opus 模型需要付费订阅）
@@ -706,11 +706,9 @@ impl MultiTokenManager {
 
         match mode {
             "balanced" => {
-                // Least-Used 策略：选择成功次数最少的凭据
-                // 平局时按优先级排序（数字越小优先级越高）
-                let entry = available
-                    .iter()
-                    .min_by_key(|e| (e.success_count, e.credentials.priority))?;
+                // 随机轮询：从当前所有可用凭据中随机选择一个
+                let index = fastrand::usize(..available.len());
+                let entry = available[index];
 
                 Some((entry.id, entry.credentials.clone()))
             }
@@ -2089,8 +2087,36 @@ mod tests {
             MultiTokenManager::new(config, vec![bad_cred, good_cred], None, None, false).unwrap();
 
         let ctx = manager.acquire_context(None).await.unwrap();
-        assert_eq!(ctx.id, 2);
         assert_eq!(ctx.token, "good-token");
+        assert_eq!(ctx.id, 2);
+    }
+
+    #[test]
+    fn test_select_next_credential_balanced_ignores_success_count() {
+        let mut config = Config::default();
+        config.load_balancing_mode = "balanced".to_string();
+
+        let mut cred1 = KiroCredentials::default();
+        cred1.priority = 0;
+        cred1.id = Some(1);
+
+        let mut cred2 = KiroCredentials::default();
+        cred2.priority = 1;
+        cred2.id = Some(2);
+
+        let manager =
+            MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
+
+        {
+            let mut entries = manager.entries.lock();
+            entries.iter_mut().find(|e| e.id == 1).unwrap().success_count = 0;
+            entries.iter_mut().find(|e| e.id == 2).unwrap().success_count = 10_000;
+        }
+
+        for _ in 0..32 {
+            let (id, _) = manager.select_next_credential(None).unwrap();
+            assert!(id == 1 || id == 2);
+        }
     }
 
     #[test]
