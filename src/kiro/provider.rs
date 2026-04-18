@@ -44,8 +44,8 @@ impl KiroProvider {
     pub fn with_proxy(token_manager: Arc<MultiTokenManager>, proxy: Option<ProxyConfig>) -> Self {
         let tls_backend = token_manager.config().tls_backend;
         // 预热：构建全局代理对应的 Client
-        let initial_client = build_client(proxy.as_ref(), 720, tls_backend)
-            .expect("创建 HTTP 客户端失败");
+        let initial_client =
+            build_client(proxy.as_ref(), 720, tls_backend).expect("创建 HTTP 客户端失败");
         let mut cache = HashMap::new();
         cache.insert(proxy.clone(), initial_client);
 
@@ -192,7 +192,8 @@ impl KiroProvider {
             };
 
             let config = self.token_manager.config();
-            let machine_id = match machine_id::generate_from_credentials(&ctx.credentials, &config) {
+            let machine_id = match machine_id::generate_from_credentials(&ctx.credentials, &config)
+            {
                 Some(id) => id,
                 None => {
                     last_error = Some(anyhow::anyhow!("无法生成 machine_id，请检查凭证配置"));
@@ -201,7 +202,10 @@ impl KiroProvider {
             };
 
             let url = self.mcp_url_for(&ctx.credentials);
-            let x_amz_user_agent = format!("aws-sdk-js/1.0.34 KiroIDE-{}-{}", config.kiro_version, machine_id);
+            let x_amz_user_agent = format!(
+                "aws-sdk-js/1.0.34 KiroIDE-{}-{}",
+                config.kiro_version, machine_id
+            );
             let user_agent = format!(
                 "aws-sdk-js/1.0.34 ua/2.1 os/{} lang/js md/nodejs#{} api/codewhispererstreaming#1.0.34 m/E KiroIDE-{}-{}",
                 config.system_version, config.node_version, config.kiro_version, machine_id
@@ -278,7 +282,12 @@ impl KiroProvider {
                 if Self::is_bearer_token_invalid(&body) && !force_refreshed.contains(&ctx.id) {
                     force_refreshed.insert(ctx.id);
                     tracing::info!("凭据 #{} token 疑似被上游失效，尝试强制刷新", ctx.id);
-                    if self.token_manager.force_refresh_token_for(ctx.id).await.is_ok() {
+                    if self
+                        .token_manager
+                        .force_refresh_token_for(ctx.id)
+                        .await
+                        .is_ok()
+                    {
                         tracing::info!("凭据 #{} token 强制刷新成功，重试请求", ctx.id);
                         continue;
                     }
@@ -357,7 +366,8 @@ impl KiroProvider {
             };
 
             let config = self.token_manager.config();
-            let machine_id = match machine_id::generate_from_credentials(&ctx.credentials, &config) {
+            let machine_id = match machine_id::generate_from_credentials(&ctx.credentials, &config)
+            {
                 Some(id) => id,
                 None => {
                     last_error = Some(anyhow::anyhow!("无法生成 machine_id，请检查凭证配置"));
@@ -366,7 +376,10 @@ impl KiroProvider {
             };
 
             let url = self.base_url_for(&ctx.credentials);
-            let x_amz_user_agent = format!("aws-sdk-js/1.0.34 KiroIDE-{}-{}", config.kiro_version, machine_id);
+            let x_amz_user_agent = format!(
+                "aws-sdk-js/1.0.34 KiroIDE-{}-{}",
+                config.kiro_version, machine_id
+            );
             let user_agent = format!(
                 "aws-sdk-js/1.0.34 ua/2.1 os/{} lang/js md/nodejs#{} api/codewhispererstreaming#1.0.34 m/E KiroIDE-{}-{}",
                 config.system_version, config.node_version, config.kiro_version, machine_id
@@ -470,7 +483,12 @@ impl KiroProvider {
                 if Self::is_bearer_token_invalid(&body) && !force_refreshed.contains(&ctx.id) {
                     force_refreshed.insert(ctx.id);
                     tracing::info!("凭据 #{} token 疑似被上游失效，尝试强制刷新", ctx.id);
-                    if self.token_manager.force_refresh_token_for(ctx.id).await.is_ok() {
+                    if self
+                        .token_manager
+                        .force_refresh_token_for(ctx.id)
+                        .await
+                        .is_ok()
+                    {
                         tracing::info!("凭据 #{} token 强制刷新成功，重试请求", ctx.id);
                         continue;
                     }

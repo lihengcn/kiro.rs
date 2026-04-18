@@ -25,7 +25,6 @@ import {
   useDeleteCredential,
   useForceRefreshToken,
 } from '@/hooks/use-credentials'
-import type { RateLimitRule } from '@/types/api'
 
 interface CredentialCardProps {
   credential: CredentialStatusItem
@@ -52,16 +51,45 @@ function formatLastUsed(lastUsedAt: string | null): string {
   return `${days} 天前`
 }
 
-function formatRateLimits(rateLimits?: RateLimitRule[]): string {
-  if (!rateLimits || rateLimits.length === 0) return '未配置'
-  return rateLimits
-    .map((rule) => `${rule.window} / ${rule.maxRequests}`)
-    .join('，')
+function formatTimeUntil(value?: string): string {
+  if (!value) return ''
+  const diffMs = new Date(value).getTime() - Date.now()
+  if (diffMs <= 0) return '即将'
+
+  const totalSeconds = Math.ceil(diffMs / 1000)
+  if (totalSeconds < 60) return `${totalSeconds} 秒`
+
+  const totalMinutes = Math.ceil(totalSeconds / 60)
+  if (totalMinutes < 60) return `${totalMinutes} 分钟`
+
+  const totalHours = Math.ceil(totalMinutes / 60)
+  if (totalHours < 24) return `${totalHours} 小时`
+
+  const totalDays = Math.ceil(totalHours / 24)
+  return `${totalDays} 天`
 }
 
-function formatDateTime(value?: string): string {
-  if (!value) return '-'
-  return new Date(value).toLocaleString()
+function formatRateLimitStatusDetail(credential: CredentialStatusItem): string | null {
+  const summaries = credential.rateLimitSummaries?.slice(0, 2) ?? []
+  const fallbackSummary = credential.rateLimitSummary
+  const effectiveSummaries = summaries.length > 0 ? summaries : fallbackSummary ? [fallbackSummary] : []
+  if (effectiveSummaries.length === 0) return null
+
+  if (credential.rateLimited) {
+    const wait = formatTimeUntil(credential.nextAvailableAt)
+    const [first, second] = effectiveSummaries
+    const parts = [
+      wait ? `${first.window} 已打满，${wait}后恢复` : `${first.window} 已打满`,
+    ]
+    if (second) {
+      parts.push(`${second.window} 剩余 ${second.remainingRequests}/${second.maxRequests}`)
+    }
+    return parts.join('；')
+  }
+
+  return effectiveSummaries
+    .map((summary) => `${summary.window} 剩余 ${summary.remainingRequests}/${summary.maxRequests}`)
+    .join('，')
 }
 
 export function CredentialCard({
@@ -83,6 +111,7 @@ export function CredentialCard({
   const resetFailure = useResetFailure()
   const deleteCredential = useDeleteCredential()
   const forceRefresh = useForceRefreshToken()
+  const rateLimitStatusDetail = formatRateLimitStatusDetail(credential)
 
   const handleToggleDisabled = () => {
     setDisabled.mutate(
@@ -261,24 +290,17 @@ export function CredentialCard({
               <span className="font-medium">{credential.successCount}</span>
             </div>
             <div>
+              <span className="text-muted-foreground">最后调用：</span>
+              <span className="font-medium">{formatLastUsed(credential.lastUsedAt)}</span>
+            </div>
+            <div className="col-span-2">
               <span className="text-muted-foreground">限流状态：</span>
               <span className={credential.rateLimited ? 'text-amber-600 font-medium' : 'font-medium'}>
                 {credential.rateLimited ? '限流中' : '正常'}
               </span>
-            </div>
-            <div className="col-span-2">
-              <span className="text-muted-foreground">最后调用：</span>
-              <span className="font-medium">{formatLastUsed(credential.lastUsedAt)}</span>
-            </div>
-            {credential.rateLimited && credential.nextAvailableAt && (
-              <div className="col-span-2">
-                <span className="text-muted-foreground">恢复时间：</span>
-                <span className="font-medium">{formatDateTime(credential.nextAvailableAt)}</span>
-              </div>
-            )}
-            <div className="col-span-2">
-              <span className="text-muted-foreground">限流规则：</span>
-              <span className="font-medium">{formatRateLimits(credential.effectiveRateLimits)}</span>
+              {rateLimitStatusDetail && (
+                <span className="text-muted-foreground">（{rateLimitStatusDetail}）</span>
+              )}
             </div>
             <div className="col-span-2">
               <span className="text-muted-foreground">剩余用量：</span>

@@ -15,7 +15,7 @@ use super::error::AdminServiceError;
 use super::types::{
     AddCredentialRequest, AddCredentialResponse, BalanceResponse, CredentialStatusItem,
     CredentialsStatusResponse, DefaultRateLimitsResponse, LoadBalancingModeResponse,
-    SetLoadBalancingModeRequest,
+    RateLimitSummary, SetLoadBalancingModeRequest,
 };
 
 /// 余额缓存过期时间（秒），5 分钟
@@ -82,6 +82,20 @@ impl AdminService {
                 effective_rate_limits: entry.effective_rate_limits,
                 rate_limited: entry.rate_limited,
                 next_available_at: entry.next_available_at,
+                rate_limit_summary: entry.rate_limit_summary.map(|summary| RateLimitSummary {
+                    window: summary.window,
+                    max_requests: summary.max_requests,
+                    remaining_requests: summary.remaining_requests,
+                }),
+                rate_limit_summaries: entry
+                    .rate_limit_summaries
+                    .into_iter()
+                    .map(|summary| RateLimitSummary {
+                        window: summary.window,
+                        max_requests: summary.max_requests,
+                        remaining_requests: summary.remaining_requests,
+                    })
+                    .collect(),
             })
             .collect();
 
@@ -448,7 +462,8 @@ impl AdminService {
         let msg = e.to_string();
         if msg.contains("不存在") {
             AdminServiceError::NotFound { id }
-        } else if msg.contains("只能删除已禁用的凭据") || msg.contains("请先禁用凭据") {
+        } else if msg.contains("只能删除已禁用的凭据") || msg.contains("请先禁用凭据")
+        {
             AdminServiceError::InvalidCredential(msg)
         } else {
             AdminServiceError::InternalError(msg)

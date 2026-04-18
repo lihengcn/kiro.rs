@@ -33,6 +33,14 @@ export interface CredentialStatusItem {
   effectiveRateLimits: RateLimitRule[]
   rateLimited: boolean
   nextAvailableAt?: string
+  rateLimitSummary?: RateLimitSummary
+  rateLimitSummaries: RateLimitSummary[]
+}
+
+export interface RateLimitSummary {
+  window: string
+  maxRequests: number
+  remainingRequests: number
 }
 
 // 余额响应

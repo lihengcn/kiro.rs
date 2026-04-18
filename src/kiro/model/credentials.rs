@@ -9,7 +9,9 @@ use std::path::Path;
 
 use crate::http_client::ProxyConfig;
 use crate::model::config::Config;
-use crate::model::rate_limit::{RateLimitRule, effective_rate_limit_rules, validate_rate_limit_rules};
+use crate::model::rate_limit::{
+    RateLimitRule, effective_rate_limit_rules, validate_rate_limit_rules,
+};
 
 /// Kiro OAuth 凭证
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -269,10 +271,7 @@ impl KiroCredentials {
     }
 
     pub fn validate(&self, source: &str) -> anyhow::Result<()> {
-        validate_rate_limit_rules(
-            self.rate_limits.as_deref(),
-            &format!("{source}.rateLimits"),
-        )
+        validate_rate_limit_rules(self.rate_limits.as_deref(), &format!("{source}.rateLimits"))
     }
 }
 

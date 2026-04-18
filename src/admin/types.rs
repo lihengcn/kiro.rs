@@ -68,6 +68,24 @@ pub struct CredentialStatusItem {
     /// 最早恢复可用时间（RFC3339）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_available_at: Option<String>,
+    /// 当前最紧张的限流窗口摘要
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_summary: Option<RateLimitSummary>,
+    /// 当前最紧张的前两条限流窗口摘要
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub rate_limit_summaries: Vec<RateLimitSummary>,
+}
+
+/// 限流摘要信息
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RateLimitSummary {
+    /// 当前最紧张的时间窗口
+    pub window: String,
+    /// 该窗口允许的最大请求数
+    pub max_requests: u32,
+    /// 该窗口剩余可用请求数
+    pub remaining_requests: u32,
 }
 
 // ============ 操作请求 ============

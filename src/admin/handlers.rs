@@ -61,7 +61,10 @@ pub async fn set_credential_rate_limits(
     Path(id): Path<u64>,
     Json(payload): Json<SetRateLimitsRequest>,
 ) -> impl IntoResponse {
-    match state.service.set_credential_rate_limits(id, payload.rate_limits) {
+    match state
+        .service
+        .set_credential_rate_limits(id, payload.rate_limits)
+    {
         Ok(_) => Json(SuccessResponse::new(format!("凭据 #{} 限流规则已更新", id))).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
@@ -166,7 +169,10 @@ pub async fn set_default_rate_limits(
     State(state): State<AdminState>,
     Json(payload): Json<SetDefaultRateLimitsRequest>,
 ) -> impl IntoResponse {
-    match state.service.set_default_rate_limits(payload.default_rate_limits) {
+    match state
+        .service
+        .set_default_rate_limits(payload.default_rate_limits)
+    {
         Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }

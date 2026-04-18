@@ -340,10 +340,7 @@ pub(crate) async fn get_usage_limits(
         "aws-sdk-js/1.0.0 ua/2.1 os/{} lang/js md/nodejs#{} api/codewhispererruntime#1.0.0 m/N,E KiroIDE-{}-{}",
         os_name, node_version, kiro_version, machine_id
     );
-    let amz_user_agent = format!(
-        "aws-sdk-js/1.0.0 KiroIDE-{}-{}",
-        kiro_version, machine_id
-    );
+    let amz_user_agent = format!("aws-sdk-js/1.0.0 KiroIDE-{}-{}", kiro_version, machine_id);
 
     let client = build_client(proxy, 60, config.tls_backend)?;
 
@@ -435,6 +432,15 @@ enum RateLimitAvailability {
     LimitedUntil(Instant),
 }
 
+#[derive(Debug, Clone)]
+struct RuleRuntimeState {
+    window: String,
+    window_seconds: u64,
+    max_requests: u32,
+    remaining_requests: u32,
+    limited_until: Option<Instant>,
+}
+
 enum CredentialSelection {
     Ready(u64, KiroCredentials),
     WaitUntil(Instant),
@@ -491,6 +497,24 @@ pub struct CredentialEntrySnapshot {
     /// 最早恢复可用时间（RFC3339 格式）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_available_at: Option<String>,
+    /// 当前最紧张的限流窗口摘要
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_summary: Option<RateLimitSummarySnapshot>,
+    /// 当前最紧张的前两条限流窗口摘要
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub rate_limit_summaries: Vec<RateLimitSummarySnapshot>,
+}
+
+/// 限流摘要快照
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RateLimitSummarySnapshot {
+    /// 当前最紧张的时间窗口
+    pub window: String,
+    /// 该窗口允许的最大请求数
+    pub max_requests: u32,
+    /// 该窗口剩余可用请求数
+    pub remaining_requests: u32,
 }
 
 /// 凭据管理器状态快照
@@ -698,7 +722,11 @@ impl MultiTokenManager {
             return RateLimitAvailability::Ready;
         }
 
-        let max_window = rules.iter().map(|rule| rule.window_seconds).max().unwrap_or(0);
+        let max_window = rules
+            .iter()
+            .map(|rule| rule.window_seconds)
+            .max()
+            .unwrap_or(0);
         let max_window_duration = StdDuration::from_secs(max_window);
         while let Some(front) = state.request_timestamps.front() {
             if now.duration_since(*front) >= max_window_duration {
@@ -736,6 +764,82 @@ impl MultiTokenManager {
             .unwrap_or(RateLimitAvailability::Ready)
     }
 
+    fn collect_rule_runtime_states(
+        state: &CredentialRateLimitState,
+        rules: &[ResolvedRateLimitRule],
+        now: Instant,
+    ) -> Vec<RuleRuntimeState> {
+        rules
+            .iter()
+            .map(|rule| {
+                let window_duration = StdDuration::from_secs(rule.window_seconds);
+                let in_window: Vec<_> = state
+                    .request_timestamps
+                    .iter()
+                    .copied()
+                    .filter(|ts| ts.checked_add(window_duration).is_some_and(|end| end > now))
+                    .collect();
+
+                let count = in_window.len();
+                let limited_until = if count >= rule.max_requests as usize {
+                    let release_index = count - rule.max_requests as usize;
+                    in_window.get(release_index).map(|ts| *ts + window_duration)
+                } else {
+                    None
+                };
+
+                RuleRuntimeState {
+                    window: rule.window.clone(),
+                    window_seconds: rule.window_seconds,
+                    max_requests: rule.max_requests,
+                    remaining_requests: rule.max_requests.saturating_sub(count as u32),
+                    limited_until,
+                }
+            })
+            .collect()
+    }
+
+    fn summarize_rate_limits(
+        state: &CredentialRateLimitState,
+        rules: &[ResolvedRateLimitRule],
+        now: Instant,
+    ) -> Option<RateLimitSummarySnapshot> {
+        Self::summarize_rate_limits_top_n(state, rules, now, 1)
+            .into_iter()
+            .next()
+    }
+
+    fn summarize_rate_limits_top_n(
+        state: &CredentialRateLimitState,
+        rules: &[ResolvedRateLimitRule],
+        now: Instant,
+        limit: usize,
+    ) -> Vec<RateLimitSummarySnapshot> {
+        let mut statuses = Self::collect_rule_runtime_states(state, rules, now);
+        statuses.sort_by(|left, right| {
+            left.remaining_requests
+                .cmp(&right.remaining_requests)
+                .then_with(|| match (left.limited_until, right.limited_until) {
+                    (Some(left_until), Some(right_until)) => left_until.cmp(&right_until),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                })
+                .then_with(|| left.window_seconds.cmp(&right.window_seconds))
+                .then_with(|| left.max_requests.cmp(&right.max_requests))
+        });
+
+        statuses
+            .into_iter()
+            .take(limit)
+            .map(|status| RateLimitSummarySnapshot {
+                window: status.window,
+                max_requests: status.max_requests,
+                remaining_requests: status.remaining_requests,
+            })
+            .collect()
+    }
+
     fn reserve_rate_limit_slot(&self, id: u64, now: Instant) {
         let config = self.config();
         let mut entries = self.entries.lock();
@@ -746,7 +850,11 @@ impl MultiTokenManager {
         }
     }
 
-    fn instant_to_rfc3339(instant: Instant, now: Instant, wall_now: DateTime<Utc>) -> Option<String> {
+    fn instant_to_rfc3339(
+        instant: Instant,
+        now: Instant,
+        wall_now: DateTime<Utc>,
+    ) -> Option<String> {
         let wait = instant.checked_duration_since(now)?;
         let chrono_wait = Duration::from_std(wait).ok()?;
         Some((wall_now + chrono_wait).to_rfc3339())
@@ -923,7 +1031,11 @@ impl MultiTokenManager {
                     } else {
                         let entries = self.entries.lock();
                         let available = entries.iter().filter(|e| !e.disabled).count();
-                        anyhow::bail!("所有凭据均已禁用或不支持当前模型（{}/{}）", available, total);
+                        anyhow::bail!(
+                            "所有凭据均已禁用或不支持当前模型（{}/{}）",
+                            available,
+                            total
+                        );
                     }
                 }
             };
@@ -936,14 +1048,13 @@ impl MultiTokenManager {
                 }
                 Err(e) => {
                     // refreshToken 永久失效 → 立即禁用，不累计重试
-                    let has_available =
-                        if e.downcast_ref::<RefreshTokenInvalidError>().is_some() {
-                            tracing::warn!("凭据 #{} refreshToken 永久失效: {}", id, e);
-                            self.report_refresh_token_invalid(id)
-                        } else {
-                            tracing::warn!("凭据 #{} Token 刷新失败: {}", id, e);
-                            self.report_refresh_failure(id)
-                        };
+                    let has_available = if e.downcast_ref::<RefreshTokenInvalidError>().is_some() {
+                        tracing::warn!("凭据 #{} refreshToken 永久失效: {}", id, e);
+                        self.report_refresh_token_invalid(id)
+                    } else {
+                        tracing::warn!("凭据 #{} Token 刷新失败: {}", id, e);
+                        self.report_refresh_failure(id)
+                    };
                     attempt_count += 1;
                     if !has_available {
                         anyhow::bail!("所有凭据均已禁用（0/{}）", total);
@@ -1508,6 +1619,10 @@ impl MultiTokenManager {
                             Self::instant_to_rfc3339(next, now, wall_now)
                         }
                     };
+                    let rate_limit_summary =
+                        Self::summarize_rate_limits(&e.rate_limit_state, &resolved, now);
+                    let rate_limit_summaries =
+                        Self::summarize_rate_limits_top_n(&e.rate_limit_state, &resolved, now, 2);
 
                     CredentialEntrySnapshot {
                         id: e.id,
@@ -1531,17 +1646,22 @@ impl MultiTokenManager {
                         has_proxy: e.credentials.proxy_url.is_some(),
                         proxy_url: e.credentials.proxy_url.clone(),
                         refresh_failure_count: e.refresh_failure_count,
-                        disabled_reason: e.disabled_reason.map(|r| match r {
-                            DisabledReason::Manual => "Manual",
-                            DisabledReason::TooManyFailures => "TooManyFailures",
-                            DisabledReason::TooManyRefreshFailures => "TooManyRefreshFailures",
-                            DisabledReason::QuotaExceeded => "QuotaExceeded",
-                            DisabledReason::InvalidRefreshToken => "InvalidRefreshToken",
-                        }.to_string()),
+                        disabled_reason: e.disabled_reason.map(|r| {
+                            match r {
+                                DisabledReason::Manual => "Manual",
+                                DisabledReason::TooManyFailures => "TooManyFailures",
+                                DisabledReason::TooManyRefreshFailures => "TooManyRefreshFailures",
+                                DisabledReason::QuotaExceeded => "QuotaExceeded",
+                                DisabledReason::InvalidRefreshToken => "InvalidRefreshToken",
+                            }
+                            .to_string()
+                        }),
                         rate_limits: e.credentials.rate_limits.clone(),
                         effective_rate_limits,
                         rate_limited: next_available_at.is_some(),
                         next_available_at,
+                        rate_limit_summary,
+                        rate_limit_summaries,
                     }
                 })
                 .collect(),
@@ -1600,7 +1720,8 @@ impl MultiTokenManager {
         id: u64,
         rate_limits: Option<Vec<RateLimitRule>>,
     ) -> anyhow::Result<()> {
-        let normalized = Self::normalize_optional_rate_limits(rate_limits, "credentials.rateLimits")?;
+        let normalized =
+            Self::normalize_optional_rate_limits(rate_limits, "credentials.rateLimits")?;
 
         {
             let mut entries = self.entries.lock();
@@ -1708,8 +1829,7 @@ impl MultiTokenManager {
                 if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
                     let old_title = entry.credentials.subscription_title.clone();
                     if old_title.as_deref() != Some(subscription_title) {
-                        entry.credentials.subscription_title =
-                            Some(subscription_title.to_string());
+                        entry.credentials.subscription_title = Some(subscription_title.to_string());
                         tracing::info!(
                             "凭据 #{} 订阅等级已更新: {:?} -> {}",
                             id,
@@ -2220,21 +2340,14 @@ mod tests {
 
     #[test]
     fn test_set_load_balancing_mode_persists_to_config_file() {
-        let config_path = std::env::temp_dir().join(format!(
-            "kiro-load-balancing-{}.json",
-            uuid::Uuid::new_v4()
-        ));
+        let config_path =
+            std::env::temp_dir().join(format!("kiro-load-balancing-{}.json", uuid::Uuid::new_v4()));
         std::fs::write(&config_path, r#"{"loadBalancingMode":"priority"}"#).unwrap();
 
         let config = Config::load(&config_path).unwrap();
-        let manager = MultiTokenManager::new(
-            config,
-            vec![KiroCredentials::default()],
-            None,
-            None,
-            false,
-        )
-        .unwrap();
+        let manager =
+            MultiTokenManager::new(config, vec![KiroCredentials::default()], None, None, false)
+                .unwrap();
 
         manager
             .set_load_balancing_mode("balanced".to_string())
@@ -2268,6 +2381,77 @@ mod tests {
         assert!(entry.next_available_at.is_some());
         assert_eq!(entry.effective_rate_limits.len(), 1);
         assert_eq!(entry.effective_rate_limits[0].window, "1m");
+        let summary = entry.rate_limit_summary.as_ref().unwrap();
+        assert_eq!(summary.window, "1m");
+        assert_eq!(summary.max_requests, 1);
+        assert_eq!(summary.remaining_requests, 0);
+    }
+
+    #[test]
+    fn test_snapshot_prefers_tightest_rate_limit_summary() {
+        let mut config = Config::default();
+        config.default_rate_limits = Some(vec![
+            RateLimitRule {
+                window: "1m".to_string(),
+                max_requests: 2,
+            },
+            RateLimitRule {
+                window: "1h".to_string(),
+                max_requests: 100,
+            },
+        ]);
+
+        let mut credential = KiroCredentials::default();
+        credential.access_token = Some("token".to_string());
+        credential.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+
+        let manager = MultiTokenManager::new(config, vec![credential], None, None, false).unwrap();
+        manager.reserve_rate_limit_slot(1, Instant::now());
+
+        let snapshot = manager.snapshot();
+        let summary = snapshot.entries[0].rate_limit_summary.as_ref().unwrap();
+        assert_eq!(summary.window, "1m");
+        assert_eq!(summary.max_requests, 2);
+        assert_eq!(summary.remaining_requests, 1);
+        let summaries = &snapshot.entries[0].rate_limit_summaries;
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].window, "1m");
+        assert_eq!(summaries[0].remaining_requests, 1);
+        assert_eq!(summaries[1].window, "1h");
+        assert_eq!(summaries[1].remaining_requests, 99);
+    }
+
+    #[test]
+    fn test_snapshot_orders_summaries_by_remaining_requests() {
+        let mut config = Config::default();
+        config.default_rate_limits = Some(vec![
+            RateLimitRule {
+                window: "5m".to_string(),
+                max_requests: 10,
+            },
+            RateLimitRule {
+                window: "1d".to_string(),
+                max_requests: 200,
+            },
+        ]);
+
+        let mut credential = KiroCredentials::default();
+        credential.access_token = Some("token".to_string());
+        credential.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+
+        let manager = MultiTokenManager::new(config, vec![credential], None, None, false).unwrap();
+
+        for _ in 0..16 {
+            manager.reserve_rate_limit_slot(1, Instant::now());
+        }
+
+        let snapshot = manager.snapshot();
+        let summaries = &snapshot.entries[0].rate_limit_summaries;
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].window, "5m");
+        assert_eq!(summaries[0].remaining_requests, 0);
+        assert_eq!(summaries[1].window, "1d");
+        assert_eq!(summaries[1].remaining_requests, 184);
     }
 
     #[tokio::test]
@@ -2326,7 +2510,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_multi_token_manager_acquire_context_balanced_retries_until_bad_credential_disabled() {
+    async fn test_multi_token_manager_acquire_context_balanced_retries_until_bad_credential_disabled()
+     {
         let mut config = Config::default();
         config.load_balancing_mode = "balanced".to_string();
 
@@ -2387,7 +2572,12 @@ mod tests {
         }
         assert_eq!(manager.available_count(), 0);
 
-        let err = manager.acquire_context(None).await.err().unwrap().to_string();
+        let err = manager
+            .acquire_context(None)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
         assert!(
             err.contains("所有凭据均已禁用"),
             "错误应提示所有凭据禁用，实际: {}",
@@ -2427,7 +2617,12 @@ mod tests {
         manager.report_quota_exhausted(2);
         assert_eq!(manager.available_count(), 0);
 
-        let err = manager.acquire_context(None).await.err().unwrap().to_string();
+        let err = manager
+            .acquire_context(None)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
         assert!(
             err.contains("所有凭据均已禁用"),
             "错误应提示所有凭据禁用，实际: {}",
